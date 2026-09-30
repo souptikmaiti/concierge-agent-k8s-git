@@ -14,6 +14,12 @@ def _message_text(message: Message) -> str:
 
 
 def _task_text(task) -> str:
+    """
+    extracts the best available text answer from a task. 
+    It checks artifacts first, then the status message, 
+    then agent messages in the task history. 
+    It returns the text as a string, or an empty string if none is found.
+    """
     artifact_text = [
         part.text
         for artifact in task.artifacts
@@ -71,12 +77,18 @@ class A2AGateway:
             async with httpx.AsyncClient(
                 timeout=self.timeout_seconds, transport=self.transport
             ) as http_client:
+                
+                # A2ACardResolver discover the agent's card - metadata that describes the agent, its skills, and how to communicate with it.
                 card = await A2ACardResolver(
                     http_client, self.specialists[agent_name]
                 ).get_agent_card()
+
+                # ClientFactory turns the card into a usable connection to the agent.
                 client = ClientFactory(
                     ClientConfig(streaming=False, httpx_client=http_client)
                 ).create(card)
+
+                # SendMessageRequest is the A2A request object to send a message to the agent.
                 request = SendMessageRequest(
                     message=Message(
                         message_id=str(uuid4()),
@@ -84,7 +96,13 @@ class A2AGateway:
                         parts=[Part(text=question)],
                     )
                 )
+
+                # client.send_message() sends the request to the agent and yields responses as they arrive.
                 async for response in client.send_message(request):
+                    # streaming=False  means a successful client.send_message(request) response contains either:
+                    # message : the specialist replied directly.
+                    # task : the specialist returned a task, whose status and result may need to be checked.
+
                     if response.HasField("message"):
                         answer = _message_text(response.message)
                         if answer:
@@ -92,12 +110,15 @@ class A2AGateway:
                         return {"ok": False, "error": "Specialist returned an empty message"}
                     if response.HasField("task"):
                         task = response.task
+
+                        # polls the specialist until its task is no longer pending or working.
                         while task.status.state in {
                             TaskState.TASK_STATE_SUBMITTED,
                             TaskState.TASK_STATE_WORKING,
                         }:
                             await asyncio.sleep(0.5)
                             task = await client.get_task(GetTaskRequest(id=task.id))
+                        
                         state = TaskState.Name(task.status.state)
                         answer = _task_text(task)
                         if task.status.state == TaskState.TASK_STATE_COMPLETED:

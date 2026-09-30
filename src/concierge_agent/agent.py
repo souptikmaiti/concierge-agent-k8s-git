@@ -47,12 +47,13 @@ def make_tools(gateway: A2AGateway):
             if not isinstance(item.get("question"), str) or not item["question"].strip():
                 return {"error": "Each request needs a nonempty question."}
 
+        # invoking specialist agents concurrently and gathering the results in the same order.
         outcomes = await asyncio.gather(
             *(gateway.ask(item["agent"], item["question"]) for item in requests),
             return_exceptions=True,
         )
         results = []
-        for item, outcome in zip(requests, outcomes, strict=True):
+        for item, outcome in zip(requests, outcomes, strict=True): # strict=True ensures that requests and outcomes have the same length
             result = {"agent": item["agent"], "question": item["question"]}
             if isinstance(outcome, asyncio.CancelledError):
                 raise outcome
@@ -98,3 +99,19 @@ def build_agent(settings: Settings, gateway: A2AGateway | None = None) -> LlmAge
         ),
         tools=[discover_agents, delegate_requests],
     )
+
+# The concierge’s LLM does the planning at runtime
+# The loop is:
+#   1. The model reads the request and calls discover_agents to see the specialists’ advertised skills.
+#   2. It calls delegate_requests with 1–4 questions. Questions in that call run concurrently.
+#   3. ADK gives the returned results back to the model.
+#   4. The model decides whether it has enough information to answer or should call delegate_requests again.
+# For dependent work, it makes separate rounds. For example: ask git-agent to find the repository → read its answer → ask k8s-agent about a deployment identified from that answer → produce the final response. 
+# For independent work, it can ask both in one batch.
+
+# For this open-ended workflow, we do not need to write an explicit planning loop. 
+# LlmAgent and the ADK runtime handle the cycle: ask the model → execute a requested tool → return its result to the model → repeat until the model gives a final answer. 
+# ADK runtime documentation : https://adk.dev/runtime/event-loop/
+
+# This planning is model guided, not guaranteed. If we require rules such as “always check Git before Kubernetes” or “never exceed three delegation rounds,” 
+# those need explicit workflow logic or limits. ADK also provides deterministic workflow agents for that kind of control.
