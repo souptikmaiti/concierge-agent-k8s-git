@@ -1,0 +1,28 @@
+replicaCount: 1
+
+image:
+  repository: concierge-agent
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8000
+
+# A2A base URLs reachable from the concierge pod.
+gitAgentUrl: http://git-agent:8001
+k8sAgentUrl: http://k8s-agent:8002
+model: gemini-3.6-flash
+# Google recommends 1.0 for Gemini 3; lower values can degrade reasoning.
+temperature: "1.0"
+specialistTimeoutSeconds: "180"
+existingSecret: ""
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+

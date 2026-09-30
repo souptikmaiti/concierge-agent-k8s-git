@@ -1,0 +1,7 @@
+apiVersion: v2
+name: concierge-agent
+description: A2A concierge for GitHub and Kubernetes specialist agents
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+

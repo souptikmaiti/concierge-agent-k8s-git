@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/name: concierge-agent
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: concierge-agent
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: concierge-agent
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: concierge-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: a2a
+              containerPort: 8000
+          env:
+            - name: PORT
+              value: "8000"
+            - name: CONCIERGE_BASE_URL
+              value: "http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+            - name: GIT_AGENT_URL
+              value: {{ .Values.gitAgentUrl | quote }}
+            - name: K8S_AGENT_URL
+              value: {{ .Values.k8sAgentUrl | quote }}
+            - name: CONCIERGE_MODEL
+              value: {{ .Values.model | quote }}
+            - name: CONCIERGE_TEMPERATURE
+              value: {{ .Values.temperature | quote }}
+            - name: SPECIALIST_TIMEOUT_SECONDS
+              value: {{ .Values.specialistTimeoutSeconds | quote }}
+            {{- if .Values.existingSecret }}
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: GOOGLE_API_KEY
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: a2a
+          livenessProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: a2a
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+
