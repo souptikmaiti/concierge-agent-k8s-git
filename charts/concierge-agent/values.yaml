@@ -16,6 +16,9 @@ model: gemini-3.6-flash
 temperature: "1.0"
 specialistTimeoutSeconds: "180"
 existingSecret: ""
+# Secret containing a PostgreSQL URL in A2A_TASK_DATABASE_URL.
+existingTaskDatabaseSecret: ""
+taskDatabaseSecretKey: A2A_TASK_DATABASE_URL
 extraEnv: []
 
 resources:
@@ -25,4 +28,3 @@ resources:
   limits:
     cpu: 1000m
     memory: 1Gi
-

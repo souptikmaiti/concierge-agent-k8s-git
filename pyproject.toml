@@ -5,8 +5,8 @@ description = "A2A concierge agent for GitHub and Kubernetes specialists"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "a2a-sdk>=1,<2",
-    "google-adk[a2a]>=2.10.0,<3",
+    "a2a-sdk[postgresql]>=1,<2",
+    "google-adk[a2a,db]>=2.10.0,<3",
     "httpx>=0.28,<1",
     "python-dotenv>=1.2.3",
     "uvicorn>=0.54.0",
@@ -21,4 +21,3 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = ["pytest>=9.1.1"]
-

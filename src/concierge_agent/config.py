@@ -1,6 +1,6 @@
 """Configuration for the independently deployed concierge agent."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from urllib.parse import urlparse
@@ -17,6 +17,10 @@ class Settings:
     # Google recommends the default 1.0 for Gemini 3 to avoid degraded reasoning.
     temperature: float = 1.0
     specialist_timeout_seconds: float = 180.0
+    a2a_task_database_url: str = field(
+        default="postgresql+asyncpg://postgres@127.0.0.1:5432/concierge_agent_tasks",
+        repr=False,
+    )
     port: int = 8000
 
     @classmethod
@@ -32,6 +36,9 @@ class Settings:
             specialist_timeout_seconds=float(
                 os.getenv("SPECIALIST_TIMEOUT_SECONDS", "180")
             ),
+            a2a_task_database_url=os.getenv(
+                "A2A_TASK_DATABASE_URL", cls.a2a_task_database_url
+            ).strip(),
             port=int(os.getenv("PORT", "8000")),
         )
         settings.validate()
@@ -54,6 +61,13 @@ class Settings:
             raise ValueError("SPECIALIST_TIMEOUT_SECONDS must be positive")
         if not 1 <= self.port <= 65535:
             raise ValueError("PORT must be between 1 and 65535")
+        database = urlparse(self.a2a_task_database_url)
+        if (
+            database.scheme != "postgresql+asyncpg"
+            or not database.hostname
+            or not database.path.strip("/")
+        ):
+            raise ValueError("A2A_TASK_DATABASE_URL must be a postgresql+asyncpg URL with a host and database")
 
     @property
     def specialists(self) -> dict[str, str]:

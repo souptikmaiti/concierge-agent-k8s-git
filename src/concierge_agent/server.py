@@ -1,11 +1,19 @@
 """A2A application and CLI entry point."""
 
+from contextlib import asynccontextmanager
+
 from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 from google.adk.a2a.utils.agent_to_a2a import to_a2a
+from google.adk.artifacts import InMemoryArtifactService
+from google.adk.auth.credential_service.in_memory_credential_service import InMemoryCredentialService
+from google.adk.memory import InMemoryMemoryService
+from google.adk.runners import Runner
+from google.adk.sessions import DatabaseSessionService
 import uvicorn
 
 from concierge_agent.agent import build_agent
 from concierge_agent.config import Settings
+from concierge_agent.task_store import create_task_store
 
 
 def build_card(settings: Settings) -> AgentCard:
@@ -42,7 +50,35 @@ def build_card(settings: Settings) -> AgentCard:
 
 def build_app(settings: Settings):
     settings.validate()
-    return to_a2a(build_agent(settings), agent_card=build_card(settings), port=settings.port)
+    agent = build_agent(settings)
+    task_store, task_lifespan = create_task_store(settings.a2a_task_database_url)
+    session_service = DatabaseSessionService(db_engine=task_store.engine)
+    runner = Runner(
+        app_name=agent.name,
+        agent=agent,
+        session_service=session_service, # Conversation events and session state, including the concierge’s saved specialist contextIds.
+        artifact_service=InMemoryArtifactService(), # Files or data blobs an ADK agent saves and later loads.
+        memory_service=InMemoryMemoryService(), # Searchable information retained across sessions when the agent explicitly adds it to memory.
+        credential_service=InMemoryCredentialService(), # Credentials managed through ADK’s tool authentication flows.
+    )
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async with task_lifespan(app):
+            try:
+                await session_service.prepare_tables()
+                yield
+            finally:
+                await runner.close()
+
+    return to_a2a(
+        agent,
+        agent_card=build_card(settings),
+        port=settings.port,
+        task_store=task_store,
+        runner=runner,
+        lifespan=lifespan,
+    )
 
 
 app = build_app(Settings.from_env())
@@ -51,4 +87,3 @@ app = build_app(Settings.from_env())
 def main() -> None:
     settings = Settings.from_env()
     uvicorn.run("concierge_agent.server:app", host="0.0.0.0", port=settings.port)
-

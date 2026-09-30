@@ -19,7 +19,7 @@ repository:
 
 ```sh
 cp .env.example .env
-# Set GOOGLE_API_KEY in .env. Adjust the specialist URLs if needed.
+# Set GOOGLE_API_KEY and A2A_TASK_DATABASE_URL in .env. Adjust specialist URLs if needed.
 uv sync --locked
 uv run --locked concierge-agent
 ```
@@ -41,12 +41,14 @@ a2a send -a http://127.0.0.1:8000 \
 | `CONCIERGE_MODEL` | `gemini-3.6-flash` | ADK model name |
 | `CONCIERGE_TEMPERATURE` | `1.0` | Model sampling temperature |
 | `SPECIALIST_TIMEOUT_SECONDS` | `180` | Total wait per specialist request |
+| `A2A_TASK_DATABASE_URL` | `postgresql+asyncpg://postgres@127.0.0.1:5432/concierge_agent_tasks` | PostgreSQL URL shared by A2A tasks and ADK sessions; set the password in `.env` |
 | `PORT` | `8000` | A2A listening port |
 
 The URLs must be reachable **from the concierge process**. In Docker or
 Kubernetes, do not use `127.0.0.1` for separately running specialist services.
 Each specialist's Agent Card must advertise a URL that the concierge can also
-reach. Keep `.env` out of Git.
+reach. An agent container also needs a PostgreSQL URL using a reachable
+database hostname. Keep `.env` out of Git.
 
 ## Container and Helm
 
@@ -58,13 +60,24 @@ helm upgrade --install concierge-agent charts/concierge-agent \
   --set image.tag=0.1.0 \
   --set gitAgentUrl=http://git-agent.agent-tools.svc.cluster.local:8001 \
   --set k8sAgentUrl=http://k8s-agent.agent-tools.svc.cluster.local:8002 \
-  --set existingSecret=YOUR_MODEL_SECRET
+  --set existingSecret=YOUR_MODEL_SECRET \
+  --set existingTaskDatabaseSecret=YOUR_TASK_DATABASE_SECRET
 ```
 
-The referenced Kubernetes Secret needs a `GOOGLE_API_KEY` key. The chart
-deploys only the concierge service and expects both specialists to be deployed
-separately. The A2A task and session storage is in memory; use shared storage
-before scaling beyond one replica.
+The model Secret needs a `GOOGLE_API_KEY` key. The database Secret needs an
+`A2A_TASK_DATABASE_URL` key with a PostgreSQL URL, for example
+`postgresql+asyncpg://user:password@postgres-host:5432/concierge_agent_tasks`.
+Create the database and user before starting the agent; its task and session
+tables are created automatically. The chart deploys only the concierge service and
+expects both specialists to be deployed separately.
+
+Local and Kubernetes runs both use PostgreSQL. The local `.env.example` points
+to the Docker PostgreSQL instance on `127.0.0.1:5432`; replace its sample
+password in your `.env`. The Kubernetes Secret must point to a database
+reachable from the agent pod, not to pod-local `127.0.0.1`. Use a separate
+database for each agent service. A2A tasks and ADK session history survive
+restarts; an interrupted run is not resumed automatically. ADK artifacts,
+memory, and credentials remain in memory.
 
 ## Limits
 
@@ -75,4 +88,10 @@ before scaling beyond one replica.
 - The model is instructed to batch independent work and make follow-up calls
   for dependent work. The delegation tool executes every request within a
   batch concurrently; it does not infer dependencies inside a batch.
-
+- The concierge saves each specialist's A2A `contextId` in its PostgreSQL-backed
+  ADK session and reuses it on later calls to that specialist. Separate
+  concierge sessions have separate specialist contexts. When one batch asks
+  the same specialist multiple questions, only the first call uses and updates
+  the saved context; the other calls use fresh contexts. To continue a
+  conversation across separate client requests, reuse the concierge's own
+  A2A `contextId`.

@@ -70,7 +70,9 @@ class A2AGateway:
             ],
         }
 
-    async def ask(self, agent_name: str, question: str) -> dict:
+    async def ask(
+        self, agent_name: str, question: str, context_id: str | None = None
+    ) -> dict:
         if agent_name not in self.specialists:
             raise ValueError(f"Unknown specialist: {agent_name}")
         async with asyncio.timeout(self.timeout_seconds):
@@ -92,6 +94,7 @@ class A2AGateway:
                 request = SendMessageRequest(
                     message=Message(
                         message_id=str(uuid4()),
+                        context_id=context_id or "",
                         role=Role.ROLE_USER,
                         parts=[Part(text=question)],
                     )
@@ -106,8 +109,16 @@ class A2AGateway:
                     if response.HasField("message"):
                         answer = _message_text(response.message)
                         if answer:
-                            return {"ok": True, "answer": answer}
-                        return {"ok": False, "error": "Specialist returned an empty message"}
+                            return {
+                                "ok": True,
+                                "answer": answer,
+                                "context_id": response.message.context_id,
+                            }
+                        return {
+                            "ok": False,
+                            "error": "Specialist returned an empty message",
+                            "context_id": response.message.context_id,
+                        }
                     if response.HasField("task"):
                         task = response.task
 
@@ -123,15 +134,22 @@ class A2AGateway:
                         answer = _task_text(task)
                         if task.status.state == TaskState.TASK_STATE_COMPLETED:
                             if answer:
-                                return {"ok": True, "status": state, "answer": answer}
+                                return {
+                                    "ok": True,
+                                    "status": state,
+                                    "answer": answer,
+                                    "context_id": task.context_id,
+                                }
                             return {
                                 "ok": False,
                                 "status": state,
                                 "error": "Specialist completed without an answer",
+                                "context_id": task.context_id,
                             }
                         return {
                             "ok": False,
                             "status": state,
+                            "context_id": task.context_id,
                             "error": (
                                 _message_text(task.status.message)
                                 or answer

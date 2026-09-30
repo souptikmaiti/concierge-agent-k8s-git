@@ -1,7 +1,10 @@
 import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from urllib.parse import urlparse
 
+from a2a.server.tasks import DatabaseTaskStore
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
@@ -17,6 +20,8 @@ from a2a.types import (
     TaskStatus,
 )
 from google.protobuf.json_format import MessageToDict
+from google.adk.sessions import DatabaseSessionService
+from google.adk.sessions.state import State
 import httpx
 from starlette.testclient import TestClient
 
@@ -26,9 +31,29 @@ from concierge_agent.config import Settings
 from concierge_agent.server import build_app
 
 
+def test_a2a_runner_uses_postgresql_session_service():
+    with patch("concierge_agent.server.to_a2a") as to_a2a:
+        build_app(Settings())
+
+    task_store = to_a2a.call_args.kwargs["task_store"]
+    runner = to_a2a.call_args.kwargs["runner"]
+    assert isinstance(runner.session_service, DatabaseSessionService)
+    assert runner.session_service.db_engine is task_store.engine
+
+    async def close():
+        await runner.close()
+        await task_store.engine.dispose()
+
+    asyncio.run(close())
+
+
 def test_card_and_agent_tools():
     settings = Settings()
-    with TestClient(build_app(settings)) as client:
+    with (
+        patch.object(DatabaseTaskStore, "initialize", new_callable=AsyncMock),
+        patch.object(DatabaseSessionService, "prepare_tables", new_callable=AsyncMock),
+        TestClient(build_app(settings)) as client,
+    ):
         response = client.get("/.well-known/agent-card.json")
 
     assert response.status_code == 200
@@ -61,6 +86,7 @@ def test_gateway_discovers_card_and_reads_completed_task():
     completed = SendMessageResponse(
         task=Task(
             id="task-1",
+            context_id="git-context-1",
             status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
             artifacts=[Artifact(artifact_id="answer", parts=[Part(text="Found repo X")])],
         )
@@ -73,6 +99,10 @@ def test_gateway_discovers_card_and_reads_completed_task():
         payload = json.loads(request.content)
         assert payload["method"] == "SendMessage"
         assert payload["params"]["message"]["parts"][0]["text"] == "Find repo X"
+        if len([method for method, _ in calls if method == "POST"]) == 1:
+            assert "contextId" not in payload["params"]["message"]
+        else:
+            assert payload["params"]["message"]["contextId"] == "git-context-1"
         return httpx.Response(
             200,
             json={
@@ -91,13 +121,17 @@ def test_gateway_discovers_card_and_reads_completed_task():
     async def check():
         discovery = await gateway.discover("git_agent")
         result = await gateway.ask("git_agent", "Find repo X")
-        return discovery, result
+        follow_up = await gateway.ask(
+            "git_agent", "Find repo X", context_id=result["context_id"]
+        )
+        return discovery, result, follow_up
 
-    discovery, result = asyncio.run(check())
+    discovery, result, follow_up = asyncio.run(check())
     assert discovery["skills"][0]["id"] == "code"
     assert result["ok"] is True
     assert result["answer"] == "Found repo X"
-    assert [method for method, _ in calls] == ["GET", "GET", "POST"]
+    assert result["context_id"] == follow_up["context_id"] == "git-context-1"
+    assert [method for method, _ in calls] == ["GET", "GET", "POST", "GET", "POST"]
     assert calls[0][1] == "/.well-known/agent-card.json"
 
 
@@ -167,16 +201,23 @@ def test_delegate_batches_run_concurrently_and_can_repeat_agent():
         async def discover(self, name):
             return {"agent": name, "skills": [{"id": name}]}
 
-        async def ask(self, name, question):
-            self.calls.append((name, question))
+        async def ask(self, name, question, context_id=None):
+            self.calls.append((name, question, context_id))
+            call_number = len(self.calls)
             self.active += 1
             self.peak = max(self.peak, self.active)
             await asyncio.sleep(0.01)
             self.active -= 1
-            return {"ok": True, "answer": f"{name}: {question}"}
+            return {
+                "ok": True,
+                "answer": f"{name}: {question}",
+                "context_id": f"{name}-context-{call_number}",
+            }
 
     gateway = FakeGateway()
     discover_agents, delegate_requests = make_tools(gateway)
+    state_delta = {}
+    tool_context = SimpleNamespace(state=State({}, state_delta))
 
     async def check():
         discovered = await discover_agents()
@@ -185,10 +226,15 @@ def test_delegate_batches_run_concurrently_and_can_repeat_agent():
                 {"agent": "git_agent", "question": "Find repo"},
                 {"agent": "k8s_agent", "question": "List deployments"},
                 {"agent": "git_agent", "question": "Read implementation"},
-            ]
+            ],
+            tool_context,
         )
         second = await delegate_requests(
-            [{"agent": "k8s_agent", "question": "Check related service"}]
+            [
+                {"agent": "k8s_agent", "question": "Check related service"},
+                {"agent": "git_agent", "question": "Check another file"},
+            ],
+            tool_context,
         )
         return discovered, first, second
 
@@ -204,4 +250,48 @@ def test_delegate_batches_run_concurrently_and_can_repeat_agent():
         "git_agent",
     ]
     assert second["results"][0]["answer"] == "k8s_agent: Check related service"
-    assert len(gateway.calls) == 4
+    assert len(gateway.calls) == 5
+    assert [context_id for _, _, context_id in gateway.calls] == [
+        None,
+        None,
+        None,
+        "k8s_agent-context-2",
+        "git_agent-context-1",
+    ]
+    assert state_delta == {
+        "specialist_context:git_agent": "git_agent-context-5",
+        "specialist_context:k8s_agent": "k8s_agent-context-4",
+    }
+    assert all("context_id" not in item for item in first["results"] + second["results"])
+
+
+def test_parallel_secondary_call_does_not_replace_saved_context():
+    class FakeGateway:
+        specialists = {"git_agent": "http://git.test"}
+
+        async def ask(self, name, question, context_id=None):
+            if question == "Primary question":
+                assert context_id == "saved-context"
+                raise RuntimeError("Primary request failed")
+            assert context_id is None
+            return {"ok": True, "answer": "Secondary answer", "context_id": "new-context"}
+
+    _, delegate_requests = make_tools(FakeGateway())
+    state_delta = {}
+    tool_context = SimpleNamespace(
+        state=State({"specialist_context:git_agent": "saved-context"}, state_delta)
+    )
+    result = asyncio.run(
+        delegate_requests(
+            [
+                {"agent": "git_agent", "question": "Primary question"},
+                {"agent": "git_agent", "question": "Secondary question"},
+            ],
+            tool_context,
+        )
+    )
+
+    assert result["results"][0]["ok"] is False
+    assert result["results"][1]["answer"] == "Secondary answer"
+    assert tool_context.state["specialist_context:git_agent"] == "saved-context"
+    assert state_delta == {}

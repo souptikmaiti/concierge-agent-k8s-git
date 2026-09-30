@@ -39,6 +39,11 @@ spec:
               value: {{ .Values.temperature | quote }}
             - name: SPECIALIST_TIMEOUT_SECONDS
               value: {{ .Values.specialistTimeoutSeconds | quote }}
+            - name: A2A_TASK_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "existingTaskDatabaseSecret is required" .Values.existingTaskDatabaseSecret | quote }}
+                  key: {{ .Values.taskDatabaseSecretKey | quote }}
             {{- if .Values.existingSecret }}
             - name: GOOGLE_API_KEY
               valueFrom:
@@ -63,4 +68,3 @@ spec:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
             runAsUser: 10001
-

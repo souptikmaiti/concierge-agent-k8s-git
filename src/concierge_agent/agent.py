@@ -3,10 +3,14 @@
 import asyncio
 
 from google.adk.agents import LlmAgent
+from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
 from concierge_agent.a2a_gateway import A2AGateway
 from concierge_agent.config import Settings
+
+
+_SPECIALIST_CONTEXT_PREFIX = "specialist_context:"
 
 
 def make_tools(gateway: A2AGateway):
@@ -30,12 +34,15 @@ def make_tools(gateway: A2AGateway):
                 agents.append(outcome)
         return {"agents": agents, "unavailable": unavailable}
 
-    async def delegate_requests(requests: list[dict[str, str]]) -> dict:
+    async def delegate_requests(
+        requests: list[dict[str, str]], tool_context: ToolContext
+    ) -> dict:
         """Send independent questions to A2A specialists concurrently.
 
         Each request needs an `agent` (git_agent or k8s_agent) and a `question`.
         The list may contain the same agent more than once. For dependent work,
-        call this tool again after reading the previous results.
+        call this tool again after reading the previous results. The first
+        request per specialist reuses its session context across calls.
         """
         if not requests or len(requests) > 4:
             return {"error": "Provide 1 to 4 requests per call."}
@@ -47,20 +54,58 @@ def make_tools(gateway: A2AGateway):
             if not isinstance(item.get("question"), str) or not item["question"].strip():
                 return {"error": "Each request needs a nonempty question."}
 
-        # invoking specialist agents concurrently and gathering the results in the same order.
+        # Only the first call to a specialist in this batch uses its saved
+        # conversation. Other simultaneous calls use fresh contexts so their
+        # independent work cannot interleave in the same specialist session.
+
+        # "primary" means the first request to a particular specialist in this batch.
+        # For example, if a batch asks  git_agent  twice and  k8s_agent  once:
+        #    The first Git request is primary. It reuses Git's saved  context_id , if there is one.
+        #    The second Git request is not primary. It gets no saved  context_id , so its independent work starts in a fresh conversation.
+        #    The Kubernetes request is primary for Kubernetes and uses its own saved context, if available.
+        
+        # primary_agents  tracks which specialists have already appeared in this batch.  
+        # primary_calls  remembers which requests were primary so, after the concurrent calls finish, 
+        # only a primary request's returned  context_id  is saved for the next batch. 
+        # That prevents a parallel secondary request from replacing the specialist's ongoing conversation
+
+        primary_agents = set()
+        primary_calls = []
+        calls = []
+        for item in requests:
+            agent_name = item["agent"]
+            is_primary = agent_name not in primary_agents
+            context_id = None
+            if is_primary:
+                context_id = tool_context.state.get(
+                    f"{_SPECIALIST_CONTEXT_PREFIX}{agent_name}"
+                )
+                primary_agents.add(agent_name)
+            primary_calls.append(is_primary)
+            calls.append(gateway.ask(agent_name, item["question"], context_id))
+
+        # Invoke specialists concurrently and retain request order in the results.
         outcomes = await asyncio.gather(
-            *(gateway.ask(item["agent"], item["question"]) for item in requests),
+            *calls,
             return_exceptions=True,
         )
         results = []
-        for item, outcome in zip(requests, outcomes, strict=True): # strict=True ensures that requests and outcomes have the same length
+        for item, outcome, is_primary in zip(requests, outcomes, primary_calls, strict=True):
             result = {"agent": item["agent"], "question": item["question"]}
             if isinstance(outcome, asyncio.CancelledError):
                 raise outcome
             if isinstance(outcome, Exception):
                 result.update({"ok": False, "error": str(outcome)})
             else:
-                result.update(outcome)
+                agent_name = item["agent"]
+                context_id = outcome.get("context_id")
+                if is_primary and context_id:
+                    tool_context.state[
+                        f"{_SPECIALIST_CONTEXT_PREFIX}{agent_name}"
+                    ] = context_id
+                result.update(
+                    {key: value for key, value in outcome.items() if key != "context_id"}
+                )
             results.append(result)
         return {"results": results}
 
